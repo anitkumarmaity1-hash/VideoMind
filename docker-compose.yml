@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: videomind-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: videomind-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      - MONGO_URI=mongodb://mongo:27017
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: videomind-frontend
+    environment:
+      - VIDEOMIND_API_URL=http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
