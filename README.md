@@ -180,6 +180,17 @@ Streamlit Cloud or EC2 frontend).
 - `docs/ARCHITECTURE.md` — system design, why each piece exists, retrieval flow in detail
 - `docs/API_REFERENCE.md` — every endpoint, request/response shapes, error codes
 
+## Troubleshooting
+
+**`ServerSelectionTimeoutError` / `SSL: TLSV1_ALERT_INTERNAL_ERROR` when connecting to MongoDB Atlas
+(most common in Google Colab):** Colab's preinstalled `pymongo`/`certifi` versions are often stale
+enough to fail Atlas's TLS handshake. Fixed by:
+- The notebook now force-upgrades `pymongo` and `certifi` before first use, and `app/database/mongo.py`
+  explicitly passes `certifi.where()` as `tlsCAFile` to the Mongo client.
+- If you still hit it (e.g. pymongo was already imported earlier in the same kernel session before the
+  upgrade), do `Runtime → Restart session` in Colab and re-run all cells from the top.
+- Locally, this is rare, but the same fix applies: `pip install --upgrade pymongo certifi`.
+
 ## Known limitations (honest, per project rules)
 
 - The rule-based question router labels a question's type but doesn't currently change retrieval

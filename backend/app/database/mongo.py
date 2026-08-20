@@ -9,9 +9,18 @@ _db: AsyncIOMotorDatabase | None = None
 
 
 def get_client() -> AsyncIOMotorClient:
+    """
+    Create the Motor client. Explicitly passes certifi's CA bundle as
+    tlsCAFile — this avoids TLSV1_ALERT_INTERNAL_ERROR / SSL handshake
+    failures against MongoDB Atlas that occur in some environments
+    (notably Google Colab) whose system CA store or OpenSSL build is
+    outdated/mismatched relative to what Atlas's TLS termination expects.
+    """
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(settings.mongo_uri)
+        import certifi
+        _client = AsyncIOMotorClient(
+            settings.mongo_uri, tlsCAFile=certifi.where())
     return _client
 
 
