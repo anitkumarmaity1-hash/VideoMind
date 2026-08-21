@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
-
+    whisper_backend: str = "groq"
     # Embeddings
     text_embedding_model: str = "BAAI/bge-small-en-v1.5"
     visual_embedding_model: str = "ViT-B-32"

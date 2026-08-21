@@ -1,3 +1,4 @@
+# backend/app/services/llm_service.py — full replacement
 """
 LLM provider abstraction. Groq is the default/active provider.
 Adding OpenAI / Anthropic / Gemini / Ollama later means implementing
@@ -18,7 +19,11 @@ class LLMProvider(ABC):
 class GroqProvider(LLMProvider):
     def __init__(self):
         from groq import Groq
-        self.client = Groq(api_key=settings.groq_api_key)
+        self.client = Groq(
+            api_key=settings.groq_api_key,
+            timeout=60.0,      # fail fast instead of hanging indefinitely
+            max_retries=2,     # brief backoff on transient/rate-limit errors
+        )
         self.model = settings.groq_model
 
     def generate(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
@@ -30,7 +35,10 @@ class GroqProvider(LLMProvider):
             ],
             temperature=temperature,
         )
-        return response.choices[0].message.content
+        # message.content is typed Optional[str] — the API can return None
+        # (e.g. tool-call-only responses), so default to "" to satisfy the
+        # declared -> str return type and avoid None propagating downstream.
+        return response.choices[0].message.content or ""
 
 
 _provider = None
@@ -64,7 +72,8 @@ transcript and visual evidence provided to you. Rules:
 
 
 def build_user_prompt(question: str, text_evidence: List[Dict], visual_evidence: List[Dict], answer_mode: str) -> str:
-    mode_instruction = ANSWER_MODE_INSTRUCTIONS.get(answer_mode, ANSWER_MODE_INSTRUCTIONS["standard"])
+    mode_instruction = ANSWER_MODE_INSTRUCTIONS.get(
+        answer_mode, ANSWER_MODE_INSTRUCTIONS["standard"])
 
     text_block = "\n".join(
         f"- [{e['start_formatted']}-{e['end_formatted']}] (spoken): {e['content']}"
@@ -91,5 +100,6 @@ Answer the question using only the evidence above, citing timestamps."""
 
 def generate_grounded_answer(question: str, text_evidence: List[Dict], visual_evidence: List[Dict], answer_mode: str = "standard") -> str:
     provider = get_llm_provider()
-    user_prompt = build_user_prompt(question, text_evidence, visual_evidence, answer_mode)
+    user_prompt = build_user_prompt(
+        question, text_evidence, visual_evidence, answer_mode)
     return provider.generate(SYSTEM_PROMPT, user_prompt)
