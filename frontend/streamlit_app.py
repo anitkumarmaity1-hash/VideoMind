@@ -5,7 +5,7 @@ Layout: left = video player, right = question panel.
 import time
 import streamlit as st
 from services import api_client
-from components.timestamp_player import render_video_player, render_evidence_timestamps
+from components.timestamp_player import render_video_player
 
 st.set_page_config(page_title="VideoMind v2", layout="wide", page_icon="🎬")
 
@@ -106,14 +106,6 @@ with col_qa:
             result = api_client.ask_question(video_id, question, answer_mode)
         st.markdown("### Answer")
         st.write(result["answer"])
-
-        st.markdown("### Evidence")
-        render_evidence_timestamps(result["evidence"])
-        for e in result["evidence"]:
-            modality_icon = "🗣️" if e["modality"] == "text" else "🖼️"
-            modality_label = "Transcript" if e["modality"] == "text" else "Visual frame"
-            st.markdown(
-                f"{modality_icon} **[{e['start_formatted']}–{e['end_formatted']}]** {modality_label} _(score: {e['score']:.2f})_")
 
     st.divider()
     st.subheader("Summary")
