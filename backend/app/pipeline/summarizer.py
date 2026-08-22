@@ -1,17 +1,16 @@
-# backend/app/pipeline/summarizer.py — full replacement
 """
 Hierarchical summarization: chunk summaries -> section summaries -> final
-summary. Chunk and section summaries are independent LLM calls, so they're
-parallelized with ThreadPoolExecutor (same pattern used for Groq calls in
-the Orchestrate hackathon project) instead of running ~90 sequential calls.
+summary. Uses the LLM provider for each level; timestamps are preserved
+throughout so the final summary can reference where in the video each
+point came from.
 """
+import asyncio
 from typing import List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor
 from app.services.llm_service import get_llm_provider
 from app.utils.timestamps import format_timestamp
 
-SECTION_SIZE = 6
-MAX_WORKERS = 8  # keep under Groq's concurrent-request limits
+SECTION_SIZE = 6  # number of chunks grouped into one "section"
+MAX_CONCURRENT_LLM_CALLS = 8  # cap parallel Groq calls to avoid rate-limit errors
 
 CHUNK_SUMMARY_SYSTEM = "You summarize a short video transcript excerpt in one concise sentence. Do not add outside information."
 SECTION_SUMMARY_SYSTEM = "You merge several short summaries (from consecutive time windows of a video) into one coherent paragraph, preserving key points."
@@ -34,42 +33,62 @@ def _summarize_section(chunk_summaries: List[str], start_time: float, end_time: 
     return provider.generate(SECTION_SUMMARY_SYSTEM, prompt)
 
 
-def generate_hierarchical_summary(chunks: List[Dict[str, Any]], summary_type: str = "short") -> Dict[str, Any]:
-    # Level 1: chunk summaries, in parallel, order preserved via map()
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        chunk_summaries = list(pool.map(_summarize_chunk, chunks))
+async def generate_hierarchical_summary(chunks: List[Dict[str, Any]], summary_type: str = "short") -> Dict[str, Any]:
+    """
+    chunks: ordered list of {chunk_id, start_time, end_time, transcript}
+    Returns short bullet summary or detailed section-wise summary.
 
-    # Level 2: section summaries, also in parallel — each group is independent
-    groups = []
+    A long video can have hundreds of 10s chunks. The previous version made
+    one blocking Groq call per chunk, one per section, and one for the
+    final bullets — all synchronously, on the request's own event loop.
+    For a ~450-chunk video that's 450+ sequential network round-trips
+    blocking the whole server, which is what made "summarize" appear to
+    hang (and made it fragile to any single transient connection error).
+    This runs the per-chunk and per-section calls off the event loop with
+    bounded concurrency instead of one call at a time.
+    """
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+
+    async def _run(fn, *args):
+        async with semaphore:
+            return await asyncio.to_thread(fn, *args)
+
+    # Level 1: chunk summaries, several in flight at once
+    chunk_summaries = await asyncio.gather(*(_run(_summarize_chunk, c) for c in chunks))
+
+    # Level 2: section summaries (group consecutive chunks)
+    section_groups = []
     for i in range(0, len(chunks), SECTION_SIZE):
         group_chunks = chunks[i:i + SECTION_SIZE]
         group_summaries = chunk_summaries[i:i + SECTION_SIZE]
-        if any(group_summaries):
-            groups.append((group_chunks, group_summaries))
+        if not any(group_summaries):
+            continue
+        section_groups.append(
+            (group_chunks[0]["start_time"], group_chunks[-1]["end_time"], group_summaries))
 
-    def _do_section(group):
-        group_chunks, group_summaries = group
-        start_time = group_chunks[0]["start_time"]
-        end_time = group_chunks[-1]["end_time"]
-        return {
-            "start_time": start_time,
-            "end_time": end_time,
-            "start_formatted": format_timestamp(start_time),
-            "end_formatted": format_timestamp(end_time),
-            "summary": _summarize_section(group_summaries, start_time, end_time),
+    section_texts = await asyncio.gather(
+        *(_run(_summarize_section, summaries, start, end) for start, end, summaries in section_groups)
+    )
+
+    sections = [
+        {
+            "start_time": start,
+            "end_time": end,
+            "start_formatted": format_timestamp(start),
+            "end_formatted": format_timestamp(end),
+            "summary": text,
         }
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        sections = list(pool.map(_do_section, groups))
-
-    provider = get_llm_provider()
+        for (start, end, _summaries), text in zip(section_groups, section_texts)
+    ]
 
     if summary_type == "detailed":
         return {"summary_type": "detailed", "sections": sections}
 
+    # Level 3: final short summary (bullets) from section summaries
+    provider = get_llm_provider()
     joined_sections = "\n".join(
         f"[{s['start_formatted']}-{s['end_formatted']}] {s['summary']}" for s in sections)
-    bullets_text = provider.generate(SHORT_SUMMARY_SYSTEM, joined_sections)
+    bullets_text = await asyncio.to_thread(provider.generate, SHORT_SUMMARY_SYSTEM, joined_sections)
     bullet_points = [b.strip("-• ").strip()
                      for b in bullets_text.split("\n") if b.strip()]
 

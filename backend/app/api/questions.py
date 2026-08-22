@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
@@ -20,17 +21,24 @@ async def ask_question(video_id: str, request: QuestionRequest):
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     if video["processing_status"] != "ready":
-        raise HTTPException(status_code=409, detail=f"Video is not ready yet (status: {video['processing_status']})")
+        raise HTTPException(
+            status_code=409, detail=f"Video is not ready yet (status: {video['processing_status']})")
 
     question_type = classify_question(request.question)
 
     # All chunks for temporal expansion context
-    segments_cursor = video_segments_collection().find({"video_id": video_id}).sort("chunk_id", 1)
+    segments_cursor = video_segments_collection().find(
+        {"video_id": video_id}).sort("chunk_id", 1)
     all_segments = await segments_cursor.to_list(length=10000)
     all_chunks_by_id = {s["chunk_id"]: s for s in all_segments}
 
-    text_results = retrieve_text(request.question, video_id)
-    visual_results = retrieve_visual(request.question, video_id)
+    # embedding + Pinecone query + Groq are all synchronous/network calls;
+    # run them off the event loop so one slow question doesn't stall
+    # every other request (status polls, other users' questions, etc).
+    text_results, visual_results = await asyncio.gather(
+        asyncio.to_thread(retrieve_text, request.question, video_id),
+        asyncio.to_thread(retrieve_visual, request.question, video_id),
+    )
     fused = fuse_scores(text_results, visual_results)
 
     evidence_blocks = expand_temporal_neighbors(fused, all_chunks_by_id)
@@ -42,9 +50,13 @@ async def ask_question(video_id: str, request: QuestionRequest):
             "start_formatted": format_timestamp(b["start_time"]),
             "end_formatted": format_timestamp(b["end_time"]),
             "content": b["transcript"],
+            "score": b["score"],
         }
         for b in evidence_blocks if b["transcript"]
     ]
+    # Show the strongest evidence first, both to the person reading it and
+    # (more importantly) to the LLM assembling the answer.
+    text_evidence.sort(key=lambda e: e["score"], reverse=True)
 
     visual_evidence = [
         {
@@ -56,7 +68,9 @@ async def ask_question(video_id: str, request: QuestionRequest):
         for r in visual_results
     ]
 
-    answer_text = generate_grounded_answer(request.question, text_evidence, visual_evidence, request.answer_mode)
+    answer_text = await asyncio.to_thread(
+        generate_grounded_answer, request.question, text_evidence, visual_evidence, request.answer_mode
+    )
 
     question_id = f"q_{uuid.uuid4().hex[:10]}"
     answer_id = f"ans_{uuid.uuid4().hex[:10]}"
@@ -73,7 +87,7 @@ async def ask_question(video_id: str, request: QuestionRequest):
             start_time=e["start_time"], end_time=e["end_time"],
             start_formatted=e["start_formatted"], end_formatted=e["end_formatted"],
             modality="text", content=e["content"],
-            score=next((f["final_score"] for f in fused if f["metadata"].get("start_time") == e["start_time"]), 0.0),
+            score=e["score"],
         )
         for e in text_evidence
     ] + [
@@ -81,7 +95,8 @@ async def ask_question(video_id: str, request: QuestionRequest):
             start_time=e["start_time"], end_time=e["end_time"],
             start_formatted=e["start_formatted"], end_formatted=e["end_formatted"],
             modality="visual", content="[visual frame evidence]",
-            score=next((r["score"] for r in visual_results if r["metadata"].get("start_time") == e["start_time"]), 0.0),
+            score=next((r["score"] for r in visual_results if r["metadata"].get(
+                "start_time") == e["start_time"]), 0.0),
         )
         for e in visual_evidence
     ]
@@ -111,14 +126,17 @@ async def summarize_video(video_id: str, request: SummaryRequest):
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     if video["processing_status"] != "ready":
-        raise HTTPException(status_code=409, detail=f"Video is not ready yet (status: {video['processing_status']})")
+        raise HTTPException(
+            status_code=409, detail=f"Video is not ready yet (status: {video['processing_status']})")
 
-    segments_cursor = video_segments_collection().find({"video_id": video_id}).sort("chunk_id", 1)
+    segments_cursor = video_segments_collection().find(
+        {"video_id": video_id}).sort("chunk_id", 1)
     chunks = await segments_cursor.to_list(length=10000)
     if not chunks:
-        raise HTTPException(status_code=404, detail="No segments found for this video")
+        raise HTTPException(
+            status_code=404, detail="No segments found for this video")
 
-    result = generate_hierarchical_summary(chunks, request.summary_type)
+    result = await generate_hierarchical_summary(chunks, request.summary_type)
 
     if request.summary_type == "detailed":
         return SummaryResponse(video_id=video_id, summary_type="detailed", summary="", sections=result["sections"])

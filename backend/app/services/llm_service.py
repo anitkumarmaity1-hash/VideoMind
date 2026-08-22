@@ -1,13 +1,16 @@
-# backend/app/services/llm_service.py — full replacement
 """
 LLM provider abstraction. Groq is the default/active provider.
 Adding OpenAI / Anthropic / Gemini / Ollama later means implementing
 LLMProvider and registering it in get_llm_provider() — no changes needed
 elsewhere in the app.
 """
+import time
 from abc import ABC, abstractmethod
-from typing import List, Dict
+from typing import List, Dict, Optional
 from app.config import settings
+
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2.0
 
 
 class LLMProvider(ABC):
@@ -19,26 +22,33 @@ class LLMProvider(ABC):
 class GroqProvider(LLMProvider):
     def __init__(self):
         from groq import Groq
-        self.client = Groq(
-            api_key=settings.groq_api_key,
-            timeout=60.0,      # fail fast instead of hanging indefinitely
-            max_retries=2,     # brief backoff on transient/rate-limit errors
-        )
+        self.client = Groq(api_key=settings.groq_api_key)
         self.model = settings.groq_model
 
     def generate(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-        )
-        # message.content is typed Optional[str] — the API can return None
-        # (e.g. tool-call-only responses), so default to "" to satisfy the
-        # declared -> str return type and avoid None propagating downstream.
-        return response.choices[0].message.content or ""
+        # Groq (like any hosted API) occasionally drops a connection mid-request
+        # ("Server disconnected without sending a response"). That's transient,
+        # so retry a couple of times with backoff before giving up.
+        last_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+        # Unreachable unless MAX_RETRIES is 0, but keeps the type checker
+        # (and anyone editing MAX_RETRIES later) honest about what this raises.
+        raise last_error if last_error is not None else RuntimeError(
+            "Groq call failed with no captured exception")
 
 
 _provider = None

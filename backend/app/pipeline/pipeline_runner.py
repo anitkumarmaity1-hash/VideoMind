@@ -1,4 +1,3 @@
-# backend/app/pipeline/pipeline_runner.py — full replacement
 """
 Orchestrates the full video-processing pipeline end to end:
 audio extraction -> ASR -> chunking -> frame sampling -> embeddings ->
@@ -53,6 +52,7 @@ async def _log_job(video_id: str, stage: str, progress: int, status: str, error:
 
 
 async def run_pipeline(video_id: str):
+    """Synchronous-style orchestration using async Mongo calls between CPU-bound steps."""
     video_doc = await videos_collection().find_one({"video_id": video_id})
     if not video_doc:
         raise ValueError(f"Video {video_id} not found")
@@ -63,6 +63,13 @@ async def run_pipeline(video_id: str):
     audio_path = os.path.join(audio_dir, "audio.wav")
 
     try:
+        # --- Stage: audio extraction ---
+        # These stages are all synchronous/CPU-bound (ffmpeg subprocess,
+        # faster-whisper, opencv frame sampling). Running them inline on
+        # an `async def` blocks the whole event loop for their entire
+        # duration, which is why /status polls and other requests would
+        # stall for the length of a video's processing. asyncio.to_thread
+        # hands each one to a worker thread instead.
         await _update_status(video_id, ProcessingStatus.EXTRACTING_AUDIO)
         await _log_job(video_id, "extracting_audio", 10, "running")
         duration = await asyncio.to_thread(audio.get_video_duration, video_path)
@@ -70,13 +77,16 @@ async def run_pipeline(video_id: str):
         await videos_collection().update_one({"video_id": video_id}, {"$set": {"duration": duration}})
         await _log_job(video_id, "extracting_audio", 100, "done")
 
+        # --- Stage: transcription ---
         await _update_status(video_id, ProcessingStatus.TRANSCRIBING)
         await _log_job(video_id, "transcribing", 10, "running")
         transcript_segments = await asyncio.to_thread(transcription.transcribe_audio, audio_path)
         await _log_job(video_id, "transcribing", 100, "done")
 
+        # --- Stage: temporal chunking ---
         chunks = chunking.create_temporal_chunks(transcript_segments, duration)
 
+        # --- Stage: frame extraction ---
         await _update_status(video_id, ProcessingStatus.EXTRACTING_FRAMES)
         await _log_job(video_id, "extracting_frames", 10, "running")
         frame_results = await asyncio.to_thread(frames.extract_frames, video_path, frames_dir)
@@ -84,8 +94,10 @@ async def run_pipeline(video_id: str):
         chunks = chunking.attach_frame_timestamps(chunks, frame_timestamps)
         await _log_job(video_id, "extracting_frames", 100, "done")
 
-        segment_docs = [
-            {
+        # --- Persist segments to MongoDB ---
+        segment_docs = []
+        for c in chunks:
+            segment_docs.append({
                 "segment_id": f"{video_id}_seg_{c['chunk_id']}",
                 "video_id": video_id,
                 "chunk_id": c["chunk_id"],
@@ -93,21 +105,18 @@ async def run_pipeline(video_id: str):
                 "start_time": c["start_time"],
                 "end_time": c["end_time"],
                 "frame_timestamps": c["frame_timestamps"],
-            }
-            for c in chunks
-        ]
+            })
         if segment_docs:
             await video_segments_collection().delete_many({"video_id": video_id})
             await video_segments_collection().insert_many(segment_docs)
 
+        # --- Stage: embeddings ---
         await _update_status(video_id, ProcessingStatus.EMBEDDING)
         await _log_job(video_id, "embedding", 10, "running")
 
-        text_vectors = await asyncio.to_thread(
-            text_embeddings.embed_texts, [
-                c["transcript"] or " " for c in chunks]
-        )
+        text_vectors = await asyncio.to_thread(text_embeddings.embed_texts, [c["transcript"] or " " for c in chunks])
 
+        # pick the middle frame for each chunk (if any) as its visual representative
         chunk_to_frame = {}
         for c in chunks:
             if c["frame_timestamps"]:
@@ -117,29 +126,29 @@ async def run_pipeline(video_id: str):
                 chunk_to_frame[c["chunk_id"]] = closest[1]
 
         visual_paths = list(chunk_to_frame.values())
-        visual_vectors = (
-            await asyncio.to_thread(visual_embeddings.embed_images, visual_paths)
-            if visual_paths else []
-        )
+        visual_vectors = await asyncio.to_thread(visual_embeddings.embed_images, visual_paths) if visual_paths else []
         visual_vector_map = dict(zip(chunk_to_frame.keys(), visual_vectors))
 
         await _log_job(video_id, "embedding", 100, "done")
 
+        # --- Stage: Pinecone indexing ---
         await _update_status(video_id, ProcessingStatus.INDEXING)
         await _log_job(video_id, "indexing", 10, "running")
 
-        text_upserts = [
-            {
+        text_upserts = []
+        for c, vec in zip(chunks, text_vectors):
+            text_upserts.append({
                 "id": f"{video_id}_text_{c['chunk_id']}",
                 "values": vec,
                 "metadata": {
-                    "video_id": video_id, "chunk_id": c["chunk_id"],
-                    "start_time": c["start_time"], "end_time": c["end_time"],
-                    "modality": "text", "transcript": c["transcript"][:1000],
+                    "video_id": video_id,
+                    "chunk_id": c["chunk_id"],
+                    "start_time": c["start_time"],
+                    "end_time": c["end_time"],
+                    "modality": "text",
+                    "transcript": c["transcript"][:1000],
                 },
-            }
-            for c, vec in zip(chunks, text_vectors)
-        ]
+            })
         if text_upserts:
             await asyncio.to_thread(vector_store.upsert, "text", text_upserts)
 
@@ -150,8 +159,10 @@ async def run_pipeline(video_id: str):
                 "id": f"{video_id}_visual_{chunk_id}",
                 "values": vec,
                 "metadata": {
-                    "video_id": video_id, "chunk_id": chunk_id,
-                    "start_time": c["start_time"], "end_time": c["end_time"],
+                    "video_id": video_id,
+                    "chunk_id": chunk_id,
+                    "start_time": c["start_time"],
+                    "end_time": c["end_time"],
                     "modality": "visual",
                 },
             })
@@ -159,6 +170,8 @@ async def run_pipeline(video_id: str):
             await asyncio.to_thread(vector_store.upsert, "visual", visual_upserts)
 
         await _log_job(video_id, "indexing", 100, "done")
+
+        # --- Done ---
         await _update_status(video_id, ProcessingStatus.READY)
 
     except Exception as e:
