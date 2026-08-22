@@ -94,7 +94,7 @@ async def ask_question(video_id: str, request: QuestionRequest):
         EvidenceItem(
             start_time=e["start_time"], end_time=e["end_time"],
             start_formatted=e["start_formatted"], end_formatted=e["end_formatted"],
-            modality="text", content=e["content"],
+            modality="text", content="[transcript evidence]",
             score=e["score"],
         )
         for e in text_evidence

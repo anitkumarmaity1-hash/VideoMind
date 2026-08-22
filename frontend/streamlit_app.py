@@ -15,7 +15,8 @@ if "seek_to" not in st.session_state:
     st.session_state["seek_to"] = 0
 
 st.title("🎬 VideoMind v2 — Multimodal Video RAG")
-st.caption("Ask questions grounded in both what's said and what's shown in your video.")
+st.caption(
+    "Ask questions grounded in both what's said and what's shown in your video.")
 
 with st.sidebar:
     st.header("Upload")
@@ -25,7 +26,8 @@ with st.sidebar:
         uploaded = st.file_uploader("Video file", type=["mp4", "mov", "mkv"])
         if uploaded and st.button("Process video", key="process_upload"):
             with st.spinner("Uploading..."):
-                result = api_client.upload_video(uploaded.getvalue(), uploaded.name)
+                result = api_client.upload_video(
+                    uploaded.getvalue(), uploaded.name)
                 st.session_state["video_id"] = result["video_id"]
             st.success(f"Uploaded. Video ID: {result['video_id']}")
 
@@ -50,16 +52,20 @@ if not video_id:
 
 # --- Processing status ---
 status = api_client.get_status(video_id)
-STAGE_ORDER = ["uploaded", "extracting_audio", "transcribing", "extracting_frames", "embedding", "indexing", "ready"]
+STAGE_ORDER = ["uploaded", "extracting_audio", "transcribing",
+               "extracting_frames", "embedding", "indexing", "ready"]
 
 if status["processing_status"] != "ready" and status["processing_status"] != "failed":
-    st.warning(f"Processing status: **{status['processing_status']}** — this page will auto-refresh.")
-    progress = STAGE_ORDER.index(status["processing_status"]) / (len(STAGE_ORDER) - 1) if status["processing_status"] in STAGE_ORDER else 0
+    st.warning(
+        f"Processing status: **{status['processing_status']}** — this page will auto-refresh.")
+    progress = STAGE_ORDER.index(status["processing_status"]) / (
+        len(STAGE_ORDER) - 1) if status["processing_status"] in STAGE_ORDER else 0
     st.progress(progress)
     time.sleep(3)
     st.rerun()
 elif status["processing_status"] == "failed":
-    st.error(f"Processing failed: {status.get('error_message', 'unknown error')}")
+    st.error(
+        f"Processing failed: {status.get('error_message', 'unknown error')}")
     st.stop()
 
 col_video, col_qa = st.columns([1, 1])
@@ -67,20 +73,25 @@ col_video, col_qa = st.columns([1, 1])
 with col_video:
     st.subheader("Video")
     video_meta = api_client.get_video(video_id)
-    video_url = f"{api_client.API_BASE_URL}/data/videos/{video_id}.mp4"  # served via static mount in production
-    st.caption(f"**{video_meta['filename']}** · {video_meta.get('duration', 0):.0f}s")
+    # served via static mount in production
+    video_url = f"{api_client.API_BASE_URL}/data/videos/{video_id}.mp4"
+    st.caption(
+        f"**{video_meta['filename']}** · {video_meta.get('duration', 0):.0f}s")
     render_video_player(video_url, st.session_state["seek_to"])
 
     with st.expander("Transcript segments"):
         segments = api_client.get_segments(video_id)
         for seg in segments:
-            st.markdown(f"**[{seg['start_formatted']}–{seg['end_formatted']}]** {seg['transcript']}")
+            st.markdown(
+                f"**[{seg['start_formatted']}–{seg['end_formatted']}]** {seg['transcript']}")
 
 with col_qa:
     st.subheader("Ask a question")
 
-    answer_mode = st.selectbox("Answer mode", ["standard", "simple", "detailed", "technical"])
-    question = st.text_input("Your question", placeholder="What did the speaker say about AI?")
+    answer_mode = st.selectbox(
+        "Answer mode", ["standard", "simple", "detailed", "technical"])
+    question = st.text_input(
+        "Your question", placeholder="What did the speaker say about AI?")
 
     suggested = [
         "Summarize this video",
@@ -100,7 +111,9 @@ with col_qa:
         render_evidence_timestamps(result["evidence"])
         for e in result["evidence"]:
             modality_icon = "🗣️" if e["modality"] == "text" else "🖼️"
-            st.markdown(f"{modality_icon} **[{e['start_formatted']}–{e['end_formatted']}]** {e['content']} _(score: {e['score']:.2f})_")
+            modality_label = "Transcript" if e["modality"] == "text" else "Visual frame"
+            st.markdown(
+                f"{modality_icon} **[{e['start_formatted']}–{e['end_formatted']}]** {modality_label} _(score: {e['score']:.2f})_")
 
     st.divider()
     st.subheader("Summary")
@@ -113,4 +126,5 @@ with col_qa:
                 st.markdown(f"- {b}")
         else:
             for s in summary["sections"]:
-                st.markdown(f"**[{s['start_formatted']}–{s['end_formatted']}]** {s['summary']}")
+                st.markdown(
+                    f"**[{s['start_formatted']}–{s['end_formatted']}]** {s['summary']}")
