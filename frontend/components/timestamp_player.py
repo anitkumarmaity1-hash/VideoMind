@@ -20,15 +20,23 @@ def render_video_player(video_url: str, seek_seconds: float = 0):
     )
 
 
-def render_evidence_timestamps(evidence_items, key_prefix: str = "ev"):
+def render_evidence_timestamps(evidence_items, key_prefix: str = "ev", per_row: int = 6):
     """
-    Renders a row of [MM:SS] buttons for each evidence item. Clicking one
-    sets st.session_state['seek_to'] which the caller uses to re-render
-    the video player at that timestamp.
+    Renders [MM:SS] buttons for each evidence item, wrapped into rows of
+    `per_row` so columns never get squeezed too narrow to render the label
+    (a single st.columns(len(evidence_items)) row breaks down once there
+    are more than ~6-8 items, wrapping each label character-by-character).
+    Clicking a button sets st.session_state['seek_to'] which the caller
+    uses to re-render the video player at that timestamp.
     """
-    cols = st.columns(len(evidence_items)) if evidence_items else []
-    for i, item in enumerate(evidence_items):
-        label = f"[{item['start_formatted']}]"
-        if cols[i].button(label, key=f"{key_prefix}_{i}"):
-            st.session_state["seek_to"] = item["start_time"]
-            st.rerun()
+    if not evidence_items:
+        return
+    for row_start in range(0, len(evidence_items), per_row):
+        row_items = evidence_items[row_start:row_start + per_row]
+        cols = st.columns(per_row)
+        for i, item in enumerate(row_items):
+            label = f"[{item['start_formatted']}]"
+            idx = row_start + i
+            if cols[i].button(label, key=f"{key_prefix}_{idx}"):
+                st.session_state["seek_to"] = item["start_time"]
+                st.rerun()
