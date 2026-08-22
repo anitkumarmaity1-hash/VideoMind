@@ -3,6 +3,7 @@ VideoMind v2 — Streamlit dashboard.
 Layout: left = video player, right = question panel.
 """
 import time
+import requests
 import streamlit as st
 from services import api_client
 from components.timestamp_player import render_video_player
@@ -26,18 +27,38 @@ with st.sidebar:
         uploaded = st.file_uploader("Video file", type=["mp4", "mov", "mkv"])
         if uploaded and st.button("Process video", key="process_upload"):
             with st.spinner("Uploading..."):
-                result = api_client.upload_video(
-                    uploaded.getvalue(), uploaded.name)
-                st.session_state["video_id"] = result["video_id"]
-            st.success(f"Uploaded. Video ID: {result['video_id']}")
+                try:
+                    result = api_client.upload_video(
+                        uploaded.getvalue(), uploaded.name)
+                    st.session_state["video_id"] = result["video_id"]
+                except requests.exceptions.HTTPError as e:
+                    detail = e.response.json().get("detail", str(
+                        e)) if e.response is not None else str(e)
+                    st.error(f"Upload failed: {detail}")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Couldn't reach the backend: {e}")
+                else:
+                    st.success(f"Uploaded. Video ID: {result['video_id']}")
 
     with tab_url:
         url = st.text_input("YouTube URL")
         if url and st.button("Process URL", key="process_url"):
             with st.spinner("Fetching..."):
-                result = api_client.upload_from_url(url)
-                st.session_state["video_id"] = result["video_id"]
-            st.success(f"Queued. Video ID: {result['video_id']}")
+                try:
+                    result = api_client.upload_from_url(url)
+                    st.session_state["video_id"] = result["video_id"]
+                except requests.exceptions.HTTPError as e:
+                    # Backend returns {"detail": "..."} on 4xx — surface that
+                    # message instead of letting the raw HTTPError crash the
+                    # whole Streamlit script (which is what "Uncaught app
+                    # exception" was: raise_for_status() with no try/except).
+                    detail = e.response.json().get("detail", str(
+                        e)) if e.response is not None else str(e)
+                    st.error(f"Couldn't process that URL: {detail}")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Couldn't reach the backend: {e}")
+                else:
+                    st.success(f"Queued. Video ID: {result['video_id']}")
 
     st.divider()
     manual_id = st.text_input("Or load existing video_id")

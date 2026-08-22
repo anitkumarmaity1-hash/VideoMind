@@ -37,11 +37,13 @@ def get_permitted_metadata(url: str) -> dict:
         "quiet": True,
         "skip_download": True,
         "noplaylist": True,
-        # The "web" client alone increasingly gets served a signature/PO-token
-        # challenge that looks like "video unavailable" from yt-dlp's side.
-        # Falling through android -> web -> tv mirrors yt-dlp's own current
-        # recommendation and avoids most of those false negatives.
-        "extractor_args": {"youtube": {"player_client": ["android", "web", "tv"]}},
+        # No explicit player_client override here on purpose: "android" and
+        # "web" now require a PO token (YouTube's proof-of-origin check)
+        # that yt-dlp can't generate without a browser/plugin, and forcing
+        # them fails hard with "Precondition check failed" / HTTP 400
+        # instead of falling back gracefully. Leaving this unset lets
+        # yt-dlp's own default client list (which it keeps current across
+        # releases) pick clients that currently work without a token.
     }
     try:
         # yt-dlp's type stubs declare YoutubeDL(params: _Params | None), a
@@ -83,7 +85,7 @@ def download_video(url: str, output_path: str) -> str:
         "outtmpl": output_path,
         "noplaylist": True,
         "quiet": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "web", "tv"]}},
+        # Same reasoning as get_permitted_metadata: no forced player_client.
     }
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
