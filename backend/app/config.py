@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # be the closest semantic match, and the rest get silently dropped.
     broad_question_top_k: int = 25
 
+    # YouTube / yt-dlp
+    # YouTube requires a PO Token (proof-of-origin) for GVS/Player/Subs
+    # requests on most clients now — yt-dlp cannot generate one itself.
+    # Per yt-dlp's own compatibility table (github.com/yt-dlp/yt-dlp/wiki/
+    # PO-Token-Guide), tv / android_vr / web_embedded currently do NOT
+    # require a token. This list is deliberately a setting, not a
+    # hardcoded constant, because YouTube changes which clients are
+    # exempt every few months — when downloads start failing again,
+    # check that wiki page and update this env var rather than editing
+    # code.
+    youtube_player_clients: str = "tv,android_vr,web_embedded"
+
     # Storage
     storage_backend: str = "local"
     local_data_dir: str = "./data"

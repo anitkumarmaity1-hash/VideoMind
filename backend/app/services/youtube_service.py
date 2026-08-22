@@ -7,6 +7,7 @@ an error rather than working around it.
 """
 import re
 from typing import Any, cast
+from app.config import settings
 
 YOUTUBE_URL_PATTERN = re.compile(
     r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"
@@ -29,6 +30,29 @@ def validate_url(url: str) -> bool:
     return bool(YOUTUBE_URL_PATTERN.search(url))
 
 
+def _base_ydl_opts() -> dict:
+    """Shared yt-dlp options for both metadata fetch and download.
+
+    Explicitly targets player clients that currently don't require a PO
+    Token (see settings.youtube_player_clients) instead of relying on
+    yt-dlp's own default ("web", generally), which now needs both a PO
+    Token we can't generate and a JS runtime (for nsig deciphering) that
+    isn't installed here — the combination silently drops every real
+    video format and leaves only thumbnail/image "formats", which is why
+    downloads were failing with "Requested format is not available"
+    even after the "Precondition check failed" warnings looked resolved.
+    """
+    return {
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    c.strip() for c in settings.youtube_player_clients.split(",") if c.strip()
+                ]
+            }
+        },
+    }
+
+
 def get_permitted_metadata(url: str) -> dict:
     """Fetch title/duration without downloading, respecting platform restrictions."""
     import yt_dlp
@@ -37,13 +61,7 @@ def get_permitted_metadata(url: str) -> dict:
         "quiet": True,
         "skip_download": True,
         "noplaylist": True,
-        # No explicit player_client override here on purpose: "android" and
-        # "web" now require a PO token (YouTube's proof-of-origin check)
-        # that yt-dlp can't generate without a browser/plugin, and forcing
-        # them fails hard with "Precondition check failed" / HTTP 400
-        # instead of falling back gracefully. Leaving this unset lets
-        # yt-dlp's own default client list (which it keeps current across
-        # releases) pick clients that currently work without a token.
+        **_base_ydl_opts(),
     }
     try:
         # yt-dlp's type stubs declare YoutubeDL(params: _Params | None), a
@@ -85,7 +103,7 @@ def download_video(url: str, output_path: str) -> str:
         "outtmpl": output_path,
         "noplaylist": True,
         "quiet": True,
-        # Same reasoning as get_permitted_metadata: no forced player_client.
+        **_base_ydl_opts(),
     }
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
