@@ -78,9 +78,24 @@ async def run_pipeline(video_id: str):
         await _log_job(video_id, "extracting_audio", 100, "done")
 
         # --- Stage: transcription ---
+        # This is usually the slowest stage on CPU and, with no progress
+        # reporting, "transcribing" would sit unchanged for a long time and
+        # look hung even when it's working. transcribe_audio runs in a
+        # worker thread, so its progress callback can't just `await` the
+        # async Mongo update directly — it hands the coroutine back to this
+        # loop via run_coroutine_threadsafe instead.
         await _update_status(video_id, ProcessingStatus.TRANSCRIBING)
-        await _log_job(video_id, "transcribing", 10, "running")
-        transcript_segments = await asyncio.to_thread(transcription.transcribe_audio, audio_path)
+        await _log_job(video_id, "transcribing", 0, "running")
+        loop = asyncio.get_running_loop()
+
+        def _report_transcription_progress(pct: float) -> None:
+            asyncio.run_coroutine_threadsafe(
+                _log_job(video_id, "transcribing", int(pct), "running"), loop
+            )
+
+        transcript_segments = await asyncio.to_thread(
+            transcription.transcribe_audio, audio_path, duration, _report_transcription_progress
+        )
         await _log_job(video_id, "transcribing", 100, "done")
 
         # --- Stage: temporal chunking ---

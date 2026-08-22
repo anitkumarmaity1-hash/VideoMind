@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
-    whisper_backend: str = "groq"
+    # Beam search of 5 (faster-whisper's typical default) is noticeably
+    # slower than greedy decoding on CPU for marginal accuracy gain on
+    # clear speech. Drop to 1 by default for local/CPU dev; bump it back
+    # up in .env if running on the GPU worker, where the cost is cheap.
+    whisper_beam_size: int = 1
+
     # Embeddings
     text_embedding_model: str = "BAAI/bge-small-en-v1.5"
     visual_embedding_model: str = "ViT-B-32"
