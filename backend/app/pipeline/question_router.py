@@ -9,6 +9,7 @@ from enum import Enum
 
 class QuestionType(str, Enum):
     SUMMARY = "summary"
+    ENUMERATION = "enumeration_question"
     TEXT = "text_question"
     VISUAL = "visual_question"
     TEMPORAL = "temporal_question"
@@ -20,6 +21,20 @@ _SUMMARY_PATTERNS = [
     r"\bmain topic\b",
     r"\bwhat is this video about\b",
     r"\btl;?dr\b",
+]
+
+# Questions that ask for every item in a set ("the five ideas", "how many
+# ways", "list all the steps") need evidence gathered from across the whole
+# video, not just the handful of chunks that best match the question's own
+# wording — the same retrieval breadth a summary needs, even though the
+# question isn't phrased as "summarize".
+_ENUMERATION_PATTERNS = [
+    r"\bhow many\b",
+    r"\blist (all|the|out)?\b",
+    r"\benumerate\b",
+    r"\ball the\b.{0,40}\b(ideas?|ways?|steps?|points?|reasons?|methods?|tips?|things?|examples?|entry points?)\b",
+    r"\bwhat are the\b.{0,40}\b(ideas?|ways?|steps?|points?|reasons?|methods?|tips?|things?|examples?|entry points?)\b",
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(ideas?|ways?|steps?|points?|reasons?|methods?|tips?|things?|entry points?)\b",
 ]
 
 _VISUAL_PATTERNS = [
@@ -48,6 +63,10 @@ def classify_question(question: str) -> QuestionType:
     for pattern in _SUMMARY_PATTERNS:
         if re.search(pattern, q):
             return QuestionType.SUMMARY
+
+    for pattern in _ENUMERATION_PATTERNS:
+        if re.search(pattern, q):
+            return QuestionType.ENUMERATION
 
     for pattern in _TEMPORAL_PATTERNS:
         if re.search(pattern, q):

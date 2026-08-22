@@ -5,7 +5,7 @@ text embeddings and visual embeddings, held in two separate indexes
 
 Methods: upsert(), query(), delete_video(), get_video_chunks()
 """
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional
 from app.config import settings
 
 _pc_client = None
@@ -38,14 +38,16 @@ def _ensure_index(name: str, dim: int):
 def _text_idx():
     global _text_index
     if _text_index is None:
-        _text_index = _ensure_index(settings.pinecone_text_index, settings.text_embedding_dim)
+        _text_index = _ensure_index(
+            settings.pinecone_text_index, settings.text_embedding_dim)
     return _text_index
 
 
 def _visual_idx():
     global _visual_index
     if _visual_index is None:
-        _visual_index = _ensure_index(settings.pinecone_visual_index, settings.visual_embedding_dim)
+        _visual_index = _ensure_index(
+            settings.pinecone_visual_index, settings.visual_embedding_dim)
     return _visual_index
 
 
@@ -62,7 +64,7 @@ def upsert(modality: Literal["text", "visual"], vectors: List[Dict[str, Any]]) -
     index.upsert(vectors=vectors)
 
 
-def query(modality: Literal["text", "visual"], vector: List[float], video_id: str, top_k: int = None) -> List[Dict[str, Any]]:
+def query(modality: Literal["text", "visual"], vector: List[float], video_id: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
     top_k = top_k or settings.top_k
     index = _index_for(modality)
     result = index.query(

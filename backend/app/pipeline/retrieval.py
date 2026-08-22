@@ -1,19 +1,19 @@
 """
 Multimodal retrieval: text retrieval, visual retrieval, and score fusion.
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.config import settings
 from app.services import vector_store
 from app.pipeline.text_embeddings import embed_query
 from app.pipeline.visual_embeddings import embed_text_for_visual_search
 
 
-def retrieve_text(question: str, video_id: str, top_k: int = None) -> List[Dict[str, Any]]:
+def retrieve_text(question: str, video_id: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
     vector = embed_query(question)
     return vector_store.query("text", vector, video_id, top_k=top_k)
 
 
-def retrieve_visual(question: str, video_id: str, top_k: int = None) -> List[Dict[str, Any]]:
+def retrieve_visual(question: str, video_id: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
     vector = embed_text_for_visual_search(question)
     return vector_store.query("visual", vector, video_id, top_k=top_k)
 
@@ -21,8 +21,8 @@ def retrieve_visual(question: str, video_id: str, top_k: int = None) -> List[Dic
 def fuse_scores(
     text_results: List[Dict[str, Any]],
     visual_results: List[Dict[str, Any]],
-    text_weight: float = None,
-    visual_weight: float = None,
+    text_weight: Optional[float] = None,
+    visual_weight: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Combine text and visual retrieval results keyed by chunk_id, using:
@@ -36,17 +36,20 @@ def fuse_scores(
 
     for r in text_results:
         chunk_id = r["metadata"]["chunk_id"]
-        by_chunk.setdefault(chunk_id, {"metadata": r["metadata"], "text_score": 0.0, "visual_score": 0.0})
+        by_chunk.setdefault(
+            chunk_id, {"metadata": r["metadata"], "text_score": 0.0, "visual_score": 0.0})
         by_chunk[chunk_id]["text_score"] = r["score"]
 
     for r in visual_results:
         chunk_id = r["metadata"]["chunk_id"]
-        by_chunk.setdefault(chunk_id, {"metadata": r["metadata"], "text_score": 0.0, "visual_score": 0.0})
+        by_chunk.setdefault(
+            chunk_id, {"metadata": r["metadata"], "text_score": 0.0, "visual_score": 0.0})
         by_chunk[chunk_id]["visual_score"] = r["score"]
 
     fused = []
     for chunk_id, data in by_chunk.items():
-        final_score = text_weight * data["text_score"] + visual_weight * data["visual_score"]
+        final_score = text_weight * \
+            data["text_score"] + visual_weight * data["visual_score"]
         fused.append({
             "chunk_id": chunk_id,
             "metadata": data["metadata"],

@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     text_score_weight: float = 0.6
     visual_score_weight: float = 0.4
     top_k: int = 5
+    # "List all N things"-style questions need evidence gathered from
+    # across the whole video, not just the 5 chunks closest to the
+    # question's own wording — otherwise a question like "what are the
+    # five ideas discussed" only surfaces whichever 1-2 points happen to
+    # be the closest semantic match, and the rest get silently dropped.
+    broad_question_top_k: int = 25
 
     # Storage
     storage_backend: str = "local"

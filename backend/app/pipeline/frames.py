@@ -5,11 +5,11 @@ avoid loading the whole video into memory.
 """
 import os
 import cv2
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from app.config import settings
 
 
-def extract_frames(video_path: str, output_dir: str, sample_fps: float = None) -> List[Tuple[float, str]]:
+def extract_frames(video_path: str, output_dir: str, sample_fps: Optional[float] = None) -> List[Tuple[float, str]]:
     """
     Returns a list of (timestamp_seconds, frame_file_path) tuples.
     """

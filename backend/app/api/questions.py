@@ -4,8 +4,9 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from app.database.mongo import videos_collection, video_segments_collection, questions_collection, answers_collection
+from app.config import settings
 from app.models.question import QuestionRequest, AnswerResponse, EvidenceItem, SummaryRequest, SummaryResponse
-from app.pipeline.question_router import classify_question
+from app.pipeline.question_router import classify_question, QuestionType
 from app.pipeline.retrieval import retrieve_text, retrieve_visual, fuse_scores
 from app.pipeline.reranking import expand_temporal_neighbors
 from app.pipeline.summarizer import generate_hierarchical_summary
@@ -25,6 +26,11 @@ async def ask_question(video_id: str, request: QuestionRequest):
             status_code=409, detail=f"Video is not ready yet (status: {video['processing_status']})")
 
     question_type = classify_question(request.question)
+    # Broad "list every X" questions need evidence pulled from across the
+    # whole video rather than the usual narrow top-5 — see broad_question_top_k.
+    is_broad = question_type in (
+        QuestionType.SUMMARY, QuestionType.ENUMERATION)
+    retrieval_top_k = settings.broad_question_top_k if is_broad else None
 
     # All chunks for temporal expansion context
     segments_cursor = video_segments_collection().find(
@@ -36,8 +42,10 @@ async def ask_question(video_id: str, request: QuestionRequest):
     # run them off the event loop so one slow question doesn't stall
     # every other request (status polls, other users' questions, etc).
     text_results, visual_results = await asyncio.gather(
-        asyncio.to_thread(retrieve_text, request.question, video_id),
-        asyncio.to_thread(retrieve_visual, request.question, video_id),
+        asyncio.to_thread(retrieve_text, request.question,
+                          video_id, retrieval_top_k),
+        asyncio.to_thread(retrieve_visual, request.question,
+                          video_id, retrieval_top_k),
     )
     fused = fuse_scores(text_results, visual_results)
 

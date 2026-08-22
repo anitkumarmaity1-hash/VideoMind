@@ -5,6 +5,7 @@ S3 for production. Methods: save(), get_url(), delete(), exists()
 import os
 import shutil
 from abc import ABC, abstractmethod
+from typing import Optional
 from app.config import settings
 
 
@@ -27,7 +28,7 @@ class StorageBackend(ABC):
 
 
 class LocalStorageBackend(StorageBackend):
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = base_dir or settings.local_data_dir
         os.makedirs(self.base_dir, exist_ok=True)
 
@@ -54,13 +55,15 @@ class LocalStorageBackend(StorageBackend):
 
 
 class S3StorageBackend(StorageBackend):
-    def __init__(self, bucket: str = None, region: str = None):
+    def __init__(self, bucket: Optional[str] = None, region: Optional[str] = None):
         import boto3
         self.bucket = bucket or settings.aws_s3_bucket
-        self.client = boto3.client("s3", region_name=region or settings.aws_region)
+        self.client = boto3.client(
+            "s3", region_name=region or settings.aws_region)
 
     def save(self, local_tmp_path: str, dest_relative_path: str) -> str:
-        self.client.upload_file(local_tmp_path, self.bucket, dest_relative_path)
+        self.client.upload_file(
+            local_tmp_path, self.bucket, dest_relative_path)
         return dest_relative_path
 
     def get_url(self, dest_relative_path: str) -> str:

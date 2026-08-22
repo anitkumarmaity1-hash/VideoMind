@@ -5,15 +5,15 @@ Splits a transcript (list of {start, end, text} segments from Whisper) into
 fixed-size overlapping time windows, and attaches the transcript text and
 sampled frame timestamps that fall inside each window.
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.config import settings
 
 
 def create_temporal_chunks(
     transcript_segments: List[Dict[str, Any]],
     video_duration: float,
-    chunk_size: int = None,
-    overlap: int = None,
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     transcript_segments: [{"start": float, "end": float, "text": str}, ...]
