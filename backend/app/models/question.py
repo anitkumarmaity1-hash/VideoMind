@@ -39,3 +39,15 @@ class SummaryResponse(BaseModel):
     summary: str
     bullet_points: Optional[List[str]] = None
     sections: Optional[List[dict]] = None
+
+
+class HistoryEntry(BaseModel):
+    question_id: str
+    question: str
+    answer: str
+    timestamp: datetime
+
+
+class HistoryResponse(BaseModel):
+    video_id: str
+    entries: List[HistoryEntry]

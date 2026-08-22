@@ -53,6 +53,10 @@ def answers_collection():
     return get_db()["answers"]
 
 
+def users_collection():
+    return get_db()["users"]
+
+
 async def ensure_indexes():
     """Create indexes required for efficient queries. Called on startup."""
     await videos_collection().create_index("video_id", unique=True)
@@ -60,7 +64,12 @@ async def ensure_indexes():
     await processing_jobs_collection().create_index("video_id")
     await video_segments_collection().create_index([("video_id", 1), ("chunk_id", 1)])
     await questions_collection().create_index("video_id")
+    # Powers the per-user, per-video chat history sidebar: newest-first
+    # lookups scoped to one user's questions on one video.
+    await questions_collection().create_index([("video_id", 1), ("user_id", 1), ("timestamp", -1)])
     await answers_collection().create_index("question_id")
+    await users_collection().create_index("user_id", unique=True)
+    await users_collection().create_index("username", unique=True)
 
 
 async def ping() -> bool:

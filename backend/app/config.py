@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     # Groq
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
+    # Groq's on-demand free tier caps `openai/gpt-oss-20b` at a strict
+    # 8000 tokens-per-minute *account-wide* limit. Kept comfortably below
+    # that (not at 8000) so estimation error and other concurrent traffic
+    # against the same key don't tip it over. Raise this if you're on a
+    # paid tier with a higher TPM cap.
+    groq_tpm_limit: int = 6500
+    # How many Groq calls the summarizer fires concurrently. This bounds
+    # *concurrency*, not token rate — see llm_service._TokenRateLimiter
+    # for the part that actually keeps aggregate usage under the TPM cap.
+    # Kept modest so a burst of concurrent requests doesn't itself blow
+    # past the per-minute budget before the limiter can react.
+    groq_max_concurrent_calls: int = 3
 
     # ASR
     whisper_model: str = "small"
@@ -34,6 +46,33 @@ class Settings(BaseSettings):
     # clear speech. Drop to 1 by default for local/CPU dev; bump it back
     # up in .env if running on the GPU worker, where the cost is cheap.
     whisper_beam_size: int = 1
+    # 0 = auto (use all logical cores). A single WhisperModel.transcribe()
+    # call is otherwise CPU-bound on ctranslate2's internal thread pool,
+    # which by default does NOT use every core on the machine — this is
+    # the single biggest reason a 20-minute clip could take ~2 hours on
+    # CPU. See transcription.py for how this is combined with
+    # whisper_parallel_chunks.
+    whisper_cpu_threads: int = 0
+    # On CPU, split the audio into this many roughly-equal, slightly
+    # overlapping segments and transcribe them concurrently (one
+    # faster-whisper worker per segment) instead of one long sequential
+    # pass. ctranslate2 releases the GIL during inference, so this gives
+    # close to linear speedup with core count on a multi-core machine.
+    # Set to 1 to disable and fall back to a single sequential pass
+    # (used automatically on GPU, where a single pass is already fast and
+    # splitting only adds overhead).
+    whisper_parallel_chunks: int = 4
+    # Below this duration, splitting isn't worth the fixed overhead
+    # (model warm-up per thread, ffmpeg segment extraction) — short clips
+    # just run as a single pass regardless of whisper_parallel_chunks.
+    whisper_parallel_min_duration_seconds: float = 90.0
+    # Overlap between adjacent parallel segments, in seconds. Each part is
+    # decoded with this many extra seconds of audio *context* on either
+    # side so words right at a cut point aren't misheard, but only the
+    # segments that start inside the part's own (non-overlapping) time
+    # range are kept — so overlap improves boundary accuracy without
+    # producing duplicate transcript text.
+    whisper_parallel_overlap_seconds: float = 3.0
 
     # Embeddings
     text_embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -82,6 +121,15 @@ class Settings(BaseSettings):
     # Upload
     max_upload_size_mb: int = 500
     allowed_video_extensions: str = ".mp4,.mov,.mkv"
+
+    # Auth
+    # MUST be overridden via .env in any real deployment — this default
+    # only exists so the app doesn't crash on a fresh clone. Tokens signed
+    # with a leaked/default secret can be forged, so treat this the same
+    # as a database password.
+    jwt_secret_key: str = "dev-only-insecure-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # 7 days
 
     # App
     app_env: str = "development"

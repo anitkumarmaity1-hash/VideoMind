@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.database.mongo import ensure_indexes
-from app.api import health, videos, questions
+from app.api import health, videos, questions, auth
 
 
 @asynccontextmanager
@@ -28,5 +28,6 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(auth.router)
 app.include_router(videos.router)
 app.include_router(questions.router)

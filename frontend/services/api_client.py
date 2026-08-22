@@ -9,7 +9,43 @@ import requests
 
 API_BASE_URL = os.environ.get("VIDEOMIND_API_URL", "http://localhost:8000")
 DEFAULT_TIMEOUT = 15
-LLM_TIMEOUT = 90  # question/summary endpoints do retrieval + Groq calls
+LLM_TIMEOUT = 90  # question endpoint does retrieval + one Groq call
+SUMMARY_TIMEOUT = 300  # summary endpoint paces several Groq calls under a low TPM cap
+
+
+def _auth_headers(token: str | None) -> dict:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def register(username: str, password: str):
+    resp = requests.post(
+        f"{API_BASE_URL}/api/auth/register",
+        json={"username": username, "password": password},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def login(username: str, password: str):
+    resp = requests.post(
+        f"{API_BASE_URL}/api/auth/login",
+        json={"username": username, "password": password},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_history(video_id: str, token: str, limit: int = 50):
+    resp = requests.get(
+        f"{API_BASE_URL}/api/videos/{video_id}/history",
+        params={"limit": limit},
+        headers=_auth_headers(token),
+        timeout=DEFAULT_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def upload_video(file_bytes: bytes, filename: str):
@@ -48,21 +84,28 @@ def get_segments(video_id: str):
     return resp.json()
 
 
-def ask_question(video_id: str, question: str, answer_mode: str = "standard"):
+def ask_question(video_id: str, question: str, answer_mode: str = "standard", token: str | None = None):
     resp = requests.post(
         f"{API_BASE_URL}/api/videos/{video_id}/questions",
         json={"question": question, "answer_mode": answer_mode},
+        headers=_auth_headers(token),
         timeout=LLM_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def get_summary(video_id: str, summary_type: str = "short"):
+def get_summary(video_id: str, summary_type: str = "short", token: str | None = None):
     resp = requests.post(
         f"{API_BASE_URL}/api/videos/{video_id}/summary",
         json={"summary_type": summary_type},
-        timeout=LLM_TIMEOUT,
+        headers=_auth_headers(token),
+        # Summaries now make far fewer, but individually rate-limit-paced,
+        # Groq calls (see summarizer.py) — a long video's summary can
+        # legitimately take a few minutes on a low-TPM Groq tier rather
+        # than erroring out, so this gets a longer timeout than other
+        # LLM-backed calls instead of failing fast.
+        timeout=SUMMARY_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()

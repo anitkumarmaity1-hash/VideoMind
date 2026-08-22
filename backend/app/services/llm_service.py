@@ -4,12 +4,18 @@ Adding OpenAI / Anthropic / Gemini / Ollama later means implementing
 LLMProvider and registering it in get_llm_provider() — no changes needed
 elsewhere in the app.
 """
+import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 from app.config import settings
 
+# Rate-limit errors get a larger retry budget than other transient errors:
+# they're *expected* under Groq's low free-tier TPM cap and are always
+# recoverable by waiting, unlike a genuine server error.
 MAX_RETRIES = 3
+MAX_RATE_LIMIT_RETRIES = 6
 RETRY_BACKOFF_SECONDS = 2.0
 
 
@@ -19,6 +25,77 @@ class LLMProvider(ABC):
         ...
 
 
+def _estimate_tokens(*texts: str) -> int:
+    """Rough token estimate (~4 chars/token for English) plus a fixed
+    overhead for chat-completion framing (role wrappers, etc). Good enough
+    to pace requests against a TPM budget — it doesn't need to be exact,
+    just not wildly optimistic."""
+    return sum(max(1, len(t) // 4) for t in texts) + 50
+
+
+def _parse_retry_after_seconds(exc: Exception, default: float) -> float:
+    """Groq's 429 body includes a human-readable 'Please try again in
+    15.94s' — use it directly when present instead of guessing with a
+    generic backoff, since it reflects exactly how long the account's
+    rolling TPM window needs to drain."""
+    match = re.search(r"try again in ([\d.]+)s", str(exc))
+    if match:
+        try:
+            return float(match.group(1)) + 0.25
+        except ValueError:
+            pass
+    return default
+
+
+class _TokenRateLimiter:
+    """
+    Sliding-window token budget shared across every Groq call in this
+    process (question answering + all levels of summarization). Groq's
+    free-tier TPM cap is account-wide, not per-request, so bounding
+    *concurrency* alone (see summarizer.MAX_CONCURRENT_LLM_CALLS) isn't
+    enough — a handful of concurrent requests can each be small on their
+    own and still blow through the cap in aggregate over a rolling
+    60-second window. This blocks the calling thread until there's
+    headroom, so callers naturally get paced instead of erroring out.
+    """
+
+    def __init__(self, tpm_limit: int):
+        self._lock = threading.Lock()
+        self._events: List[tuple] = []  # (timestamp, estimated_tokens)
+        self._tpm_limit = tpm_limit
+
+    def acquire(self, estimated_tokens: int) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - 60
+                self._events = [(t, n) for t, n in self._events if t > cutoff]
+                used = sum(n for _, n in self._events)
+                if used + estimated_tokens <= self._tpm_limit or not self._events:
+                    self._events.append((now, estimated_tokens))
+                    return
+                wait_for = 60 - (now - self._events[0][0]) + 0.1
+            # Sleep outside the lock, in small increments, so other threads
+            # can also check/update the window while this one waits.
+            time.sleep(max(0.1, min(wait_for, 5.0)))
+
+    def report_actual_usage(self, estimated_tokens: int, actual_tokens: int) -> None:
+        """Correct the most recent estimate once the real usage is known
+        (from the API response), so estimation drift doesn't compound
+        over a long run of many calls."""
+        if actual_tokens <= 0:
+            return
+        with self._lock:
+            for i in range(len(self._events) - 1, -1, -1):
+                ts, n = self._events[i]
+                if n == estimated_tokens:
+                    self._events[i] = (ts, actual_tokens)
+                    return
+
+
+_rate_limiter = _TokenRateLimiter(settings.groq_tpm_limit)
+
+
 class GroqProvider(LLMProvider):
     def __init__(self):
         from groq import Groq
@@ -26,11 +103,15 @@ class GroqProvider(LLMProvider):
         self.model = settings.groq_model
 
     def generate(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
-        # Groq (like any hosted API) occasionally drops a connection mid-request
-        # ("Server disconnected without sending a response"). That's transient,
-        # so retry a couple of times with backoff before giving up.
+        from groq import RateLimitError
+
+        estimated_tokens = _estimate_tokens(system_prompt, user_prompt)
         last_error: Optional[Exception] = None
-        for attempt in range(MAX_RETRIES):
+        rate_limit_attempts = 0
+
+        attempt = 0
+        while attempt < MAX_RETRIES:
+            _rate_limiter.acquire(estimated_tokens)
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -40,13 +121,32 @@ class GroqProvider(LLMProvider):
                     ],
                     temperature=temperature,
                 )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    _rate_limiter.report_actual_usage(
+                        estimated_tokens, getattr(usage, "total_tokens", 0))
                 return response.choices[0].message.content or ""
-            except Exception as e:
+            except RateLimitError as e:
+                # Doesn't count against the normal retry budget — this is
+                # the expected/recoverable case the limiter above exists
+                # for, and its own retry budget is larger.
                 last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
-        # Unreachable unless MAX_RETRIES is 0, but keeps the type checker
-        # (and anyone editing MAX_RETRIES later) honest about what this raises.
+                rate_limit_attempts += 1
+                if rate_limit_attempts >= MAX_RATE_LIMIT_RETRIES:
+                    raise
+                wait = _parse_retry_after_seconds(
+                    e, default=RETRY_BACKOFF_SECONDS * rate_limit_attempts)
+                time.sleep(wait)
+                continue
+            except Exception as e:
+                # Groq (like any hosted API) occasionally drops a connection
+                # mid-request ("Server disconnected without sending a
+                # response"). That's transient, so retry a couple of times
+                # with backoff before giving up.
+                last_error = e
+                attempt += 1
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
         raise last_error if last_error is not None else RuntimeError(
             "Groq call failed with no captured exception")
 

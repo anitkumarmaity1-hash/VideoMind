@@ -1,23 +1,28 @@
 import asyncio
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends
 
 from app.database.mongo import videos_collection, video_segments_collection, questions_collection, answers_collection
 from app.config import settings
-from app.models.question import QuestionRequest, AnswerResponse, EvidenceItem, SummaryRequest, SummaryResponse
+from app.models.question import (
+    QuestionRequest, AnswerResponse, EvidenceItem, SummaryRequest, SummaryResponse,
+    HistoryEntry, HistoryResponse,
+)
 from app.pipeline.question_router import classify_question, QuestionType
 from app.pipeline.retrieval import retrieve_text, retrieve_visual, fuse_scores
 from app.pipeline.reranking import expand_temporal_neighbors
 from app.pipeline.summarizer import generate_hierarchical_summary
 from app.services.llm_service import generate_grounded_answer
 from app.utils.timestamps import format_timestamp
+from app.api.auth import get_current_user, get_optional_user
 
 router = APIRouter(prefix="/api/videos", tags=["questions"])
 
 
 @router.post("/{video_id}/questions", response_model=AnswerResponse)
-async def ask_question(video_id: str, request: QuestionRequest):
+async def ask_question(video_id: str, request: QuestionRequest, current_user: Optional[dict] = Depends(get_optional_user)):
     video = await videos_collection().find_one({"video_id": video_id})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -88,6 +93,11 @@ async def ask_question(video_id: str, request: QuestionRequest):
         "video_id": video_id,
         "question": request.question,
         "timestamp": datetime.utcnow(),
+        # None for unauthenticated/API callers (e.g. tests, curl) — kept
+        # optional so existing non-UI usage of this endpoint keeps working.
+        # The Streamlit frontend always sends a token, so history seen
+        # there is scoped per logged-in user.
+        "user_id": current_user["user_id"] if current_user else None,
     })
 
     evidence_items = [
@@ -151,3 +161,26 @@ async def summarize_video(video_id: str, request: SummaryRequest):
 
     summary_text = "\n".join(f"- {b}" for b in result["bullet_points"])
     return SummaryResponse(video_id=video_id, summary_type="short", summary=summary_text, bullet_points=result["bullet_points"])
+
+
+@router.get("/{video_id}/history", response_model=HistoryResponse)
+async def get_history(video_id: str, current_user: dict = Depends(get_current_user), limit: int = 50):
+    """Past questions this logged-in user asked about this specific video,
+    newest first, each paired with its answer. Powers the sidebar
+    "History" panel in the frontend."""
+    questions_cursor = questions_collection().find(
+        {"video_id": video_id, "user_id": current_user["user_id"]}
+    ).sort("timestamp", -1).limit(limit)
+    past_questions = await questions_cursor.to_list(length=limit)
+
+    entries = []
+    for q in past_questions:
+        answer_doc = await answers_collection().find_one({"question_id": q["question_id"]})
+        entries.append(HistoryEntry(
+            question_id=q["question_id"],
+            question=q["question"],
+            answer=answer_doc["answer"] if answer_doc else "",
+            timestamp=q["timestamp"],
+        ))
+
+    return HistoryResponse(video_id=video_id, entries=entries)

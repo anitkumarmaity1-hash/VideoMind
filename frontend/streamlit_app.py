@@ -14,12 +14,81 @@ if "video_id" not in st.session_state:
     st.session_state["video_id"] = None
 if "seek_to" not in st.session_state:
     st.session_state["seek_to"] = 0
+if "auth_token" not in st.session_state:
+    st.session_state["auth_token"] = None
+if "username" not in st.session_state:
+    st.session_state["username"] = None
+
+
+def _render_auth_page():
+    """Login/register gate shown before any video/chat functionality.
+    Auth is required in the UI so per-user chat history has a stable
+    identity to key on; the backend itself still accepts unauthenticated
+    calls to /questions (see api/auth.get_optional_user) so existing
+    tests/API usage aren't broken."""
+    st.title("🎬 VideoMind v2")
+    st.caption("Sign in to ask questions and keep a history per video.")
+
+    tab_login, tab_register = st.tabs(["Log in", "Register"])
+
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input(
+                "Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Log in")
+        if submitted:
+            try:
+                result = api_client.login(username, password)
+            except requests.exceptions.HTTPError as e:
+                detail = e.response.json().get("detail", str(
+                    e)) if e.response is not None else str(e)
+                st.error(f"Login failed: {detail}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Couldn't reach the backend: {e}")
+            else:
+                st.session_state["auth_token"] = result["access_token"]
+                st.session_state["username"] = result["user"]["username"]
+                st.rerun()
+
+    with tab_register:
+        with st.form("register_form"):
+            new_username = st.text_input("Username", key="register_username")
+            new_password = st.text_input(
+                "Password", type="password", key="register_password",
+                help="At least 8 characters.")
+            submitted = st.form_submit_button("Create account")
+        if submitted:
+            try:
+                result = api_client.register(new_username, new_password)
+            except requests.exceptions.HTTPError as e:
+                detail = e.response.json().get("detail", str(
+                    e)) if e.response is not None else str(e)
+                st.error(f"Registration failed: {detail}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Couldn't reach the backend: {e}")
+            else:
+                st.session_state["auth_token"] = result["access_token"]
+                st.session_state["username"] = result["user"]["username"]
+                st.rerun()
+
+
+if not st.session_state["auth_token"]:
+    _render_auth_page()
+    st.stop()
 
 st.title("🎬 VideoMind v2 — Multimodal Video RAG")
 st.caption(
     "Ask questions grounded in both what's said and what's shown in your video.")
 
 with st.sidebar:
+    st.caption(f"Signed in as **{st.session_state['username']}**")
+    if st.button("Log out"):
+        st.session_state["auth_token"] = None
+        st.session_state["username"] = None
+        st.rerun()
+
+    st.divider()
     st.header("Upload")
     tab_file, tab_url = st.tabs(["Upload file", "YouTube URL"])
 
@@ -64,6 +133,29 @@ with st.sidebar:
     manual_id = st.text_input("Or load existing video_id")
     if manual_id:
         st.session_state["video_id"] = manual_id
+
+    st.divider()
+    st.header("History")
+    if st.session_state["video_id"]:
+        try:
+            history = api_client.get_history(
+                st.session_state["video_id"], st.session_state["auth_token"])
+        except requests.exceptions.HTTPError as e:
+            detail = e.response.json().get("detail", str(
+                e)) if e.response is not None else str(e)
+            st.caption(f"Couldn't load history: {detail}")
+        except requests.exceptions.RequestException as e:
+            st.caption(f"Couldn't reach the backend: {e}")
+        else:
+            entries = history.get("entries", [])
+            if not entries:
+                st.caption("No questions asked yet for this video.")
+            for entry in entries:
+                with st.expander(entry["question"][:60] + ("…" if len(entry["question"]) > 60 else "")):
+                    st.markdown(f"**Q:** {entry['question']}")
+                    st.markdown(f"**A:** {entry['answer']}")
+    else:
+        st.caption("Load a video to see your past questions about it.")
 
 video_id = st.session_state["video_id"]
 
@@ -124,16 +216,21 @@ with col_qa:
 
     if st.button("Ask") and question:
         with st.spinner("Retrieving evidence and generating answer..."):
-            result = api_client.ask_question(video_id, question, answer_mode)
+            result = api_client.ask_question(
+                video_id, question, answer_mode, token=st.session_state["auth_token"])
         st.markdown("### Answer")
         st.write(result["answer"])
+        # This question now shows up in the sidebar History panel on the
+        # next rerun (e.g. after the user asks another question) since
+        # it's refetched from the backend each time rather than cached.
 
     st.divider()
     st.subheader("Summary")
     summary_type = st.radio("Type", ["short", "detailed"], horizontal=True)
     if st.button("Generate summary"):
-        with st.spinner("Summarizing..."):
-            summary = api_client.get_summary(video_id, summary_type)
+        with st.spinner("Summarizing... (this can take a few minutes on longer videos, paced by Groq's rate limit)"):
+            summary = api_client.get_summary(
+                video_id, summary_type, token=st.session_state["auth_token"])
         if summary_type == "short":
             for b in summary["bullet_points"]:
                 st.markdown(f"- {b}")
