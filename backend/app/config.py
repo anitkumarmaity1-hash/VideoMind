@@ -61,18 +61,17 @@ class Settings(BaseSettings):
     # YouTube requires a PO Token (proof-of-origin) for GVS/Player/Subs
     # requests on most clients now — yt-dlp cannot generate one itself.
     # Per yt-dlp's own compatibility table (github.com/yt-dlp/yt-dlp/wiki/
-    # PO-Token-Guide), android_vr / web_embedded / tv currently do NOT
-    # require a token — tried in that order. `tv` is listed last despite
-    # being "no token required" too, because it's been through a specific
-    # player-JS-variant regression cycle recently ("This video is
-    # unavailable. Error code: 152 - 18") that android_vr/web_embedded
-    # aren't affected by; it's still a useful third fallback, just not a
-    # reliable first choice right now.
+    # PO-Token-Guide), web_embedded and tv currently do NOT require a
+    # token with no caveats; android_vr is also listed as exempt but in
+    # practice its *https* (progressive) formats have been observed
+    # demanding a GVS PO Token anyway ("android_vr client https formats
+    # require a GVS PO Token") — kept as a third fallback since its HLS
+    # formats can still work, just not tried first.
     # This is deliberately a setting, not a hardcoded constant: YouTube
     # changes which clients are exempt every few months. When downloads
     # start failing again, check that wiki page and update this env var
     # rather than editing code.
-    youtube_player_clients: str = "android_vr,web_embedded,tv"
+    youtube_player_clients: str = "web_embedded,tv,android_vr"
 
     # Storage
     storage_backend: str = "local"

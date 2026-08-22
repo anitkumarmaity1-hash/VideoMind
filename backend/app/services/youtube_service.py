@@ -91,14 +91,21 @@ def download_video(url: str, output_path: str) -> str:
     # raises YouTubeError if restricted/unavailable
     get_permitted_metadata(url)
     ydl_opts = {
-        # Previous selector "mp4/bestvideo+bestaudio" tried a literal format
-        # id called "mp4" (which essentially never exists) and, on falling
-        # through to bestvideo+bestaudio, merged into whatever container
-        # yt-dlp defaults to (often webm) despite output_path ending in
-        # .mp4. This selector prefers a pre-merged mp4 (no ffmpeg mux
-        # needed, faster) and only falls back to muxing separate mp4
-        # video/m4a audio streams, always landing on an actual mp4.
-        "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+        # Ordered fallback, cheapest/most-compatible first:
+        # 1. bestvideo+bestaudio served over HLS (m3u8) — currently exempt
+        #    from the GVS PO Token requirement even on clients where plain
+        #    "https" progressive formats aren't (this is exactly what bit
+        #    us: android_vr's https formats demanded a token, but its HLS
+        #    ones don't).
+        # 2. a combined HLS "best" if separate streams aren't available.
+        # 3. mp4 https as before, for whichever client doesn't need a token.
+        # 4. genuinely anything, last resort.
+        "format": (
+            "bestvideo[protocol*=m3u8]+bestaudio[protocol*=m3u8]"
+            "/best[protocol*=m3u8]"
+            "/best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/best"
+        ),
         "merge_output_format": "mp4",
         "outtmpl": output_path,
         "noplaylist": True,
@@ -109,5 +116,19 @@ def download_video(url: str, output_path: str) -> str:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             ydl.download([url])
     except Exception as e:
-        raise YouTubeError(f"Download failed: {e}")
+        err_text = str(e)
+        # yt-dlp's own message here is accurate but easy to miss in a wall
+        # of warnings — surface it plainly, since installing a JS runtime
+        # (not YouTube-side flakiness) is the actual fix for this one.
+        if "403" in err_text or "PO Token" in err_text:
+            raise YouTubeError(
+                "Download failed (HTTP 403 / PO Token issue). As of late 2025, "
+                "yt-dlp needs an external JavaScript runtime (Deno recommended) "
+                "to reliably fetch YouTube formats — without one, format "
+                "availability keeps getting worse over time. Install Deno "
+                "(Windows: `winget install DenoLand.Deno`, then restart your "
+                "terminal so it's on PATH) and try again. "
+                f"Original error: {err_text}"
+            )
+        raise YouTubeError(f"Download failed: {err_text}")
     return output_path
