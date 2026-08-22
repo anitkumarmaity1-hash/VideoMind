@@ -6,6 +6,7 @@ from enum import Enum
 
 class ProcessingStatus(str, Enum):
     UPLOADED = "uploaded"
+    DOWNLOADING = "downloading"
     EXTRACTING_AUDIO = "extracting_audio"
     TRANSCRIBING = "transcribing"
     EXTRACTING_FRAMES = "extracting_frames"

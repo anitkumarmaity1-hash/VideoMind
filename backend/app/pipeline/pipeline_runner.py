@@ -102,11 +102,25 @@ async def run_pipeline(video_id: str):
         chunks = chunking.create_temporal_chunks(transcript_segments, duration)
 
         # --- Stage: frame extraction ---
+        # One representative frame per chunk (its midpoint), fetched by
+        # direct seek — see frames.extract_frames_at_timestamps for why
+        # this replaced dense uniform sampling (it was decoding the
+        # entire video just to keep ~1 in 12 frames, most of which were
+        # never used since only one frame per chunk ever gets embedded).
         await _update_status(video_id, ProcessingStatus.EXTRACTING_FRAMES)
         await _log_job(video_id, "extracting_frames", 10, "running")
-        frame_results = await asyncio.to_thread(frames.extract_frames, video_path, frames_dir)
-        frame_timestamps = [ts for ts, _path in frame_results]
-        chunks = chunking.attach_frame_timestamps(chunks, frame_timestamps)
+        chunk_midpoints = [
+            (c["start_time"] + c["end_time"]) / 2 for c in chunks]
+        frame_results = await asyncio.to_thread(
+            frames.extract_frames_at_timestamps, video_path, chunk_midpoints, frames_dir
+        )
+        # extract_frames_at_timestamps returns a positionally-aligned list
+        # (None for any failed seek), so zip is a safe 1:1 pairing here.
+        frame_by_chunk_id = dict(
+            zip((c["chunk_id"] for c in chunks), frame_results))
+        for c in chunks:
+            fr = frame_by_chunk_id.get(c["chunk_id"])
+            c["frame_timestamps"] = [fr[0]] if fr else []
         await _log_job(video_id, "extracting_frames", 100, "done")
 
         # --- Persist segments to MongoDB ---
@@ -131,14 +145,18 @@ async def run_pipeline(video_id: str):
 
         text_vectors = await asyncio.to_thread(text_embeddings.embed_texts, [c["transcript"] or " " for c in chunks])
 
-        # pick the middle frame for each chunk (if any) as its visual representative
-        chunk_to_frame = {}
+        # Each chunk now has at most one frame (its midpoint, from the
+        # direct-seek extraction above), so this is a direct lookup rather
+        # than a "closest timestamp" search. Written as an explicit loop
+        # (rather than a dict comprehension) so the None-check on `fr`
+        # actually narrows it before the subscript — a comprehension's
+        # `if` clause doesn't narrow the type used in the key/value
+        # expression for a separate subscript lookup.
+        chunk_to_frame: dict[int, str] = {}
         for c in chunks:
-            if c["frame_timestamps"]:
-                mid_ts = c["frame_timestamps"][len(c["frame_timestamps"]) // 2]
-                closest = min(
-                    frame_results, key=lambda fr: abs(fr[0] - mid_ts))
-                chunk_to_frame[c["chunk_id"]] = closest[1]
+            fr = frame_by_chunk_id.get(c["chunk_id"])
+            if fr is not None:
+                chunk_to_frame[c["chunk_id"]] = fr[1]
 
         visual_paths = list(chunk_to_frame.values())
         visual_vectors = await asyncio.to_thread(visual_embeddings.embed_images, visual_paths) if visual_paths else []

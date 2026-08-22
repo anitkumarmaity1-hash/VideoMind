@@ -52,8 +52,8 @@ if not video_id:
 
 # --- Processing status ---
 status = api_client.get_status(video_id)
-STAGE_ORDER = ["uploaded", "extracting_audio", "transcribing",
-               "extracting_frames", "embedding", "indexing", "ready"]
+STAGE_ORDER = ["uploaded", "downloading", "extracting_audio",
+               "transcribing", "extracting_frames", "embedding", "indexing", "ready"]
 
 if status["processing_status"] != "ready" and status["processing_status"] != "failed":
     st.warning(

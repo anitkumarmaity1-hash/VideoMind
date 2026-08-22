@@ -1,10 +1,11 @@
+import asyncio
 import os
 import tempfile
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks, HTTPException, Form
 from app.config import settings
 from app.utils.validation import validate_extension, validate_size, generate_video_id, ValidationError
 from app.database.mongo import videos_collection, video_segments_collection
-from app.models.video import VideoMetadata, VideoResponse, VideoStatusResponse
+from app.models.video import VideoMetadata, VideoResponse, VideoStatusResponse, ProcessingStatus
 from app.models.segment import SegmentResponse
 from app.services.storage import get_storage_backend
 from app.services.youtube_service import validate_url, get_permitted_metadata, download_video, YouTubeError
@@ -17,8 +18,14 @@ router = APIRouter(prefix="/api/videos", tags=["videos"])
 
 @router.post("/upload", response_model=VideoResponse)
 async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(
+            status_code=400, detail="Uploaded file is missing a filename")
+    # narrow to str once, rather than re-reading the Optional property
+    filename: str = file.filename
+
     try:
-        validate_extension(file.filename)
+        validate_extension(filename)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -29,7 +36,7 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
         raise HTTPException(status_code=400, detail=str(e))
 
     video_id = generate_video_id()
-    ext = os.path.splitext(file.filename)[1].lower()
+    ext = os.path.splitext(filename)[1].lower()
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=ext)
     with os.fdopen(tmp_fd, "wb") as f:
@@ -41,7 +48,7 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
 
     doc = VideoMetadata(
         video_id=video_id,
-        filename=file.filename,
+        filename=filename,
         storage_path=final_path,
         source="upload",
     )
@@ -51,7 +58,7 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
 
     return VideoResponse(
         video_id=video_id,
-        filename=file.filename,
+        filename=filename,
         duration=None,
         upload_time=doc.upload_time,
         processing_status=doc.processing_status,
@@ -62,35 +69,33 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
 @router.post("/url", response_model=VideoResponse)
 async def upload_from_youtube(background_tasks: BackgroundTasks, url: str = Form(...)):
     if not validate_url(url):
-        raise HTTPException(status_code=400, detail="Invalid or unsupported YouTube URL")
+        raise HTTPException(
+            status_code=400, detail="Invalid or unsupported YouTube URL")
 
     try:
-        metadata = get_permitted_metadata(url)
+        metadata = await asyncio.to_thread(get_permitted_metadata, url)
     except YouTubeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     video_id = generate_video_id()
-    storage = get_storage_backend()
-    dest_relative = os.path.join("videos", f"{video_id}.mp4")
-
-    tmp_path = os.path.join(tempfile.gettempdir(), f"{video_id}.mp4")
-    try:
-        download_video(url, tmp_path)
-    except YouTubeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    final_path = storage.save(tmp_path, dest_relative)
-
     doc = VideoMetadata(
         video_id=video_id,
-        filename=metadata.get("title", "youtube_video"),
-        storage_path=final_path,
+        filename=metadata.get("title") or "youtube_video",
+        storage_path="",  # filled in by _download_and_process once the download completes
         source="youtube",
         source_url=url,
+        processing_status=ProcessingStatus.DOWNLOADING,
     )
     await videos_collection().insert_one(doc.model_dump())
 
-    background_tasks.add_task(run_pipeline, video_id)
+    # The download itself (potentially minutes for a long video) now happens
+    # in the same background task as pipeline processing, same as the
+    # upload flow. Previously `download_video` ran inline, blocking this
+    # request (and the whole event loop, since yt-dlp is synchronous)
+    # until the entire video was downloaded — for a long video that alone
+    # could exceed a browser/proxy timeout and make the URL flow look
+    # broken even when the download would have eventually succeeded.
+    background_tasks.add_task(_download_and_process, video_id, url)
 
     return VideoResponse(
         video_id=video_id,
@@ -100,6 +105,27 @@ async def upload_from_youtube(background_tasks: BackgroundTasks, url: str = Form
         processing_status=doc.processing_status,
         source="youtube",
     )
+
+
+async def _download_and_process(video_id: str, url: str):
+    storage = get_storage_backend()
+    dest_relative = os.path.join("videos", f"{video_id}.mp4")
+    tmp_path = os.path.join(tempfile.gettempdir(), f"{video_id}.mp4")
+    try:
+        await asyncio.to_thread(download_video, url, tmp_path)
+        final_path = storage.save(tmp_path, dest_relative)
+        await videos_collection().update_one(
+            {"video_id": video_id}, {"$set": {"storage_path": final_path}}
+        )
+    except YouTubeError as e:
+        await videos_collection().update_one(
+            {"video_id": video_id},
+            {"$set": {"processing_status": ProcessingStatus.FAILED.value,
+                      "error_message": str(e)}},
+        )
+        return
+
+    await run_pipeline(video_id)
 
 
 @router.get("/{video_id}", response_model=VideoResponse)
@@ -131,7 +157,8 @@ async def get_video_status(video_id: str):
 
 @router.get("/{video_id}/segments", response_model=list[SegmentResponse])
 async def get_video_segments(video_id: str):
-    cursor = video_segments_collection().find({"video_id": video_id}).sort("chunk_id", 1)
+    cursor = video_segments_collection().find(
+        {"video_id": video_id}).sort("chunk_id", 1)
     segments = await cursor.to_list(length=10000)
     return [
         SegmentResponse(
@@ -153,7 +180,8 @@ async def delete_video(video_id: str):
         raise HTTPException(status_code=404, detail="Video not found")
 
     storage = get_storage_backend()
-    rel_path = os.path.relpath(doc["storage_path"], start=settings.local_data_dir)
+    rel_path = os.path.relpath(
+        doc["storage_path"], start=settings.local_data_dir)
     try:
         storage.delete(rel_path)
     except Exception:
